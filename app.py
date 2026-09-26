@@ -240,13 +240,32 @@ def list_rooms(
     public_only: bool = True,
     db: Session = Depends(get_db),
 ):
-    """List active public lives for the Discover / Feed page"""
+    """List ONLY currently active public lives for Feed.
+    Auto-ends rooms that are older than 2 hours still marked active
+    (host closed browser without End Live).
+    """
+    now = datetime.utcnow()
+    # Auto-expire abandoned rooms (host closed without End Live)
+    # Rooms older than 30 minutes still "active" are closed
+    stale = db.query(Room).filter(
+        Room.is_active == True,
+        Room.created_at < now - timedelta(minutes=30),
+    ).all()
+    for r in stale:
+        r.is_active = False
+        r.ended_at = now
+        r.viewer_count = 0
+    if stale:
+        db.commit()
+
     q = db.query(Room)
     if active_only:
         q = q.filter(Room.is_active == True)
     if public_only:
         q = q.filter(Room.is_public == True)
-    rooms = q.order_by(Room.created_at.desc()).limit(50).all()
+    # Only rooms from last 30 minutes that are still active
+    q = q.filter(Room.created_at >= now - timedelta(minutes=30))
+    rooms = q.order_by(Room.created_at.desc()).limit(30).all()
     return rooms
 
 
@@ -271,8 +290,27 @@ def end_room(
         raise HTTPException(status_code=403, detail="Only host can end the live")
     room.is_active = False
     room.ended_at = datetime.utcnow()
+    room.viewer_count = 0
     db.commit()
     return {"message": "Live ended"}
+
+
+@app.post("/rooms/{room_id}/viewers")
+def update_viewers(
+    room_id: str,
+    count: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Host/viewer reports real participant count from LiveKit"""
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room or not room.is_active:
+        return {"ok": False}
+    # Keep highest recent count (avoid flicker to 0)
+    if count >= 0:
+        room.viewer_count = count
+        db.commit()
+    return {"ok": True, "viewer_count": room.viewer_count}
 
 
 @app.post("/token")
@@ -287,15 +325,11 @@ def get_token(
     if not room.is_active:
         raise HTTPException(status_code=400, detail="This live has ended")
 
-    # Only host can request host role
     role = req.role
     if role == "host" and room.host_username != current_user.username:
         role = "viewer"
 
-    # Update viewer count roughly
-    room.viewer_count = (room.viewer_count or 0) + 1
-    db.commit()
-
+    # Do NOT inflate viewer_count on every token — use /rooms/{id}/viewers instead
     token = create_livekit_token(
         identity=req.identity or current_user.username,
         room_name=req.room_id,
@@ -306,6 +340,7 @@ def get_token(
         "url": LIVEKIT_URL,
         "room_id": req.room_id,
         "role": role,
+        "host_username": room.host_username,
     }
 
 
