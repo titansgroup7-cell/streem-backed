@@ -13,7 +13,7 @@ import os
 import uuid
 
 # ================== CONFIG ==================
-SECRET_KEY = os.getenv("SECRET_KEY", "badilisha-siri-yako-ndefu-sana")
+SECRET_KEY = os.getenv("SECRET_KEY", "badilisha-siri-yako-ndefu-sana-123456")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # wiki 1
 
@@ -21,10 +21,10 @@ LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "nrxdvx2grzt83xrf9csgejwr")
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "m3op2fhzz88dja2wjxyth5auhtomups94wnc26otuwj0as87y36er6zcm2h6cujz")
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "wss://livekit-production-85d3.up.railway.app")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./live.db")  # baadaye badilisha na Postgres
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./live.db")
 
 # ================== DATABASE ==================
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -101,17 +101,28 @@ class TokenRequest(BaseModel):
 # ================== APP ==================
 app = FastAPI(title="Live Stream API")
 
+# ========== CORS (MUHIMU) ==========
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://streemfronted-production.up.railway.app",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {"message": "Live Stream API is running"}
+
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == user.username).first():
+    existing = db.query(User).filter(User.username == user.username).first()
+    if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
     
     new_user = User(
@@ -120,7 +131,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     )
     db.add(new_user)
     db.commit()
-    return {"message": "User created successfully"}
+    db.refresh(new_user)
+    return {"message": "User created successfully", "username": new_user.username}
 
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -129,7 +141,11 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     
     access_token = create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer", "username": user.username}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username
+    }
 
 @app.post("/rooms")
 def create_room(room: RoomCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -157,13 +173,16 @@ def get_room(room_id: str, db: Session = Depends(get_db)):
     room = db.query(LiveRoom).filter(LiveRoom.room_id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    return room
+    return {
+        "room_id": room.room_id,
+        "title": room.title,
+        "is_public": room.is_public,
+        "is_live": room.is_live
+    }
 
 @app.post("/token")
 def get_livekit_token(req: TokenRequest, current_user: User = Depends(get_current_user)):
-    # permissions
     can_publish = req.role in ["host", "guest"]
-    can_publish_data = True
     
     token = api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET) \
         .with_identity(req.identity) \
@@ -173,7 +192,7 @@ def get_livekit_token(req: TokenRequest, current_user: User = Depends(get_curren
             room=req.room_id,
             can_publish=can_publish,
             can_subscribe=True,
-            can_publish_data=can_publish_data,
+            can_publish_data=True,
         ))
     
     return {
@@ -181,7 +200,3 @@ def get_livekit_token(req: TokenRequest, current_user: User = Depends(get_curren
         "url": LIVEKIT_URL,
         "room_id": req.room_id
     }
-
-@app.get("/")
-def root():
-    return {"message": "Live Stream API is running"}
